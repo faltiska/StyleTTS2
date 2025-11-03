@@ -114,14 +114,14 @@ class StyleTTS2_Helper:
         text = text.strip()  # Removes whitespaces from beginning and end of string
         text = text.replace('"', '')  # removes " to prevent unpredictable behavior
 
-        ps = self.global_phonemizer.phonemize([text])  # text -> list of phoneme
-        print("1. List of phonemes: ", ps)
-        ps = word_tokenize(ps[0])  # Split into individual tokens
-        print("2. String of phonemes: ", ps)
-        ps = ' '.join(ps)  # Join tokens together, split by a empty space
-        print("3. Final string of phonemes: ", ps)
+        phonemes = self.global_phonemizer.phonemize([text])  # text -> list of phoneme
+        print("1. List of phonemes: ", phonemes)
+        phonemes = word_tokenize(phonemes[0])  # Split into individual tokens
+        print("2. String of phonemes: ", phonemes)
+        phonemes = ' '.join(phonemes)  # Join tokens together, split by a empty space
+        print("3. Final string of phonemes: ", phonemes)
 
-        tokens = self.textcleaner(ps)  # Look up numeric ID per phoneme
+        tokens = self.textcleaner(phonemes)  # Look up numeric ID per phoneme
         print("4. ID of phonemes: ", tokens)
         tokens.insert(0, 0)  # Insert leading 0 to mark start
         print("5. ID with leading 0: ", tokens)
@@ -134,85 +134,92 @@ class StyleTTS2_Helper:
             text_mask = length_to_mask(input_lengths).to(tokens.device)  # Creates a bitmask based on number of phonemes
             print("Text Mask: ", text_mask)
 
-            t_en = self.model.text_encoder(tokens, input_lengths,
-                                      text_mask)  # Creates text encoder (phoneme -> feature vectors)
+            h_text = self.model.text_encoder(tokens, input_lengths,
+                                        text_mask)  # Creates text encoder (phoneme -> feature vectors)
+            h_bert = self.model.bert(tokens, attention_mask=(~text_mask).int())
+            bert_encoder = self.model.bert_encoder(h_bert).transpose(-1, -2)
 
             print("Features Vectors")
             for i in range(input_lengths):  # loop over phonemes/time steps
-                feature_vec = t_en[0, :, i]  # shape [D]
+                feature_vec = h_text[0, :, i]  # shape [D]
                 short_vec = feature_vec[:10]  # first 10 elements
                 print(f"{i}. {short_vec}")
 
             if adversarial_audio_generation == 0:
-                torch.save(t_en, "latents/h_text_target.pt")
+                torch.save(h_text, "latents/h_text_target.pt")
 
             elif adversarial_audio_generation == 1:
-                torch.save(t_en, "latents/h_text_ground_truth.pt")
+                torch.save(h_text, "latents/h_text_ground_truth.pt")
 
             elif adversarial_audio_generation == 2:
-                torch.save(t_en, "latents/h_text_ground_truth.pt")
-                t_en_target = torch.load("latents/h_text_target.pt")
+                torch.save(h_text, "latents/h_text_ground_truth.pt")
+                h_text_target = torch.load("latents/h_text_target.pt")
 
-                print("t_en shape:", t_en.shape)
-                print("t_en_target shape:", t_en_target.shape)
+                print("h_text shape:", h_text.shape)
+                print("h_text_target shape:", h_text_target.shape)
 
-                t_en_target = F.interpolate(t_en_target, size=t_en.size(-1), mode='linear', align_corners=False)
+                h_text_target = F.interpolate(h_text_target, size=h_text.size(-1), mode='linear', align_corners=False)
 
-                t_en = (1 - interpolation_percentage) * t_en + interpolation_percentage * t_en_target
-                torch.save(t_en, "latents/h_text_interpolated.npy")
+                h_text = (1 - interpolation_percentage) * h_text + interpolation_percentage * h_text_target
+                torch.save(h_text, "latents/h_text_interpolated.pt")
 
             elif adversarial_audio_generation == 3:
-                t_en = torch.load("latents/h_text_ground_truth.pt")
-                t_en_target = torch.load("latents/h_text_target.pt")
+                h_text = torch.load("latents/h_text_ground_truth.pt")
+                h_text_target = torch.load("latents/h_text_target.pt")
 
-                print("t_en shape:", t_en.shape)
-                print("t_en_target shape:", t_en_target.shape)
+                print("t_en shape:", h_text.shape)
+                print("t_en_target shape:", h_text_target.shape)
 
-                t_en_target = F.interpolate(t_en_target, size=t_en.size(-1), mode='linear', align_corners=False)
+                h_text_target = F.interpolate(h_text_target, size=h_text.size(-1), mode='linear', align_corners=False)
 
-                t_en = (1 - interpolation_percentage) * t_en + interpolation_percentage * t_en_target
-                torch.save(t_en, "latents/h_text_interpolated.pt")
+                h_text = (1 - interpolation_percentage) * h_text + interpolation_percentage * h_text_target
+                torch.save(h_text, "latents/h_text_interpolated.pt")
 
-            bert_dur = self.model.bert(tokens, attention_mask=(~text_mask).int())
-            d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+            s_pred = self.sampler(
+                noise,
+                embedding=h_bert[0].unsqueeze(0),
+                embedding_scale=embedding_scale,
+                num_steps=diffusion_steps
+            ).squeeze(0)
 
-            s_pred = self.sampler(noise,
-                             embedding=bert_dur[0].unsqueeze(0), num_steps=diffusion_steps,
-                             embedding_scale=embedding_scale).squeeze(0)
+            # Split Style Vector
+            style_vector_acoustic = s_pred[:, 128:]  # Right Half = Acoustic Style Vector
+            style_vector_prosodic = s_pred[:, :128]  # Left Half = Prosodic Style Vector
 
-            s = s_pred[:, 128:]
-            ref = s_pred[:, :128]
+            # AdaIN, Adding information of style vector to phoneme
+            bert_encoder_with_style = self.model.predictor.text_encoder(bert_encoder, style_vector_acoustic, input_lengths,
+                                                                   text_mask)
 
-            d = self.model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+            x, _ = self.model.predictor.lstm(
+                bert_encoder_with_style)  # Model temporal dependencies between phonemes, LSTM = RNN
+            duration = self.model.predictor.duration_proj(x)  # Predict how long each phoneme lasts
+            duration = torch.sigmoid(duration).sum(axis=-1)  # Sum of duration prediction -> Result: Prediction of frame duration
+            d_pred = torch.round(duration.squeeze()).clamp(
+                min=1)  # Convert duration prediction into integers, add clamp to ensure that each phoneme has at least one frame
 
-            x, _ = self.model.predictor.lstm(d)
-            duration = self.model.predictor.duration_proj(x)
-            duration = torch.sigmoid(duration).sum(axis=-1)
-            pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+            d_pred[-1] += 5  # Makes last phoneme last 5 frames longer, to ensure it not being cut off too fast
 
-            pred_dur[-1] += 5
-
-            pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
+            # Creates predicted alignment matrix between text (phonemes) and audio frames
+            a_pred = torch.zeros(input_lengths,
+                                 int(d_pred.sum().data))  # Initializes a matrix with sizes: [# of Phonemes (input_lengths)] x [Sum of total predicted frames]
             c_frame = 0
-            for i in range(pred_aln_trg.size(0)):
-                pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
-                c_frame += int(pred_dur[i].data)
+            for i in range(a_pred.size(0)):  # Iterates over phoneme
+                a_pred[i, c_frame:c_frame + int(d_pred[
+                                                    i].data)] = 1  # Changes for row-i (the i-th phoneme) all the values from c_frame to c_frame + int(d_pred[i].data) to 1
+                c_frame += int(d_pred[i].data)  # Move c_frame to new first start
 
-            h_aligned = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)  # (B, D_text, T_frames)
-
-            jitter_strength = 0.3  # try 0.1–0.5
-            pred_dur = torch.round(pred_dur.float() + torch.randn_like(pred_dur.float()) * jitter_strength).clamp(
-                min=1).long()
+            # Multiply alignment matrix with h_text
+            h_aligned = h_text @ a_pred.unsqueeze(0).to(self.device)  # (B, D_text, T_frames)
 
             # encode prosody
-            en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(self.device))
-            F0_pred, N_pred = self.model.predictor.F0Ntrain(en, s)
+            en = (bert_encoder_with_style.transpose(-1, -2) @ a_pred.unsqueeze(0).to(self.device))
+            F0_pred, N_pred = self.model.predictor.F0Ntrain(en, style_vector_acoustic)
 
             out = self.model.decoder(
                 h_aligned,
                 F0_pred,
                 N_pred,
-                ref.squeeze().unsqueeze(0)
+                style_vector_prosodic.squeeze().unsqueeze(0)
             )
 
         return out.squeeze().cpu().numpy()

@@ -12,7 +12,7 @@ import whisper
 
 adversarial_audio_generation = 2
 
-interpolation_percentage = 0.999
+interpolation_percentage = 0.8
 
 text = ''' No way this really works. '''
 
