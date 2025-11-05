@@ -194,22 +194,23 @@ class StyleTTS2_Helper:
             text_mask = length_to_mask(input_lengths).to(tokens.device)  # Creates a bitmask based on number of phonemes
 
             h_text = self.model.text_encoder(tokens, input_lengths, text_mask)  # Creates acoustic text encoder (phoneme -> feature vectors)
-            h_bert = self.model.bert_encoder(self.model.bert(tokens, attention_mask=(~text_mask).int())).transpose(-1, -2)  # Creates prosodic text encoder (phoneme -> feature vectors)
+            h_bert = self.model.bert(tokens, attention_mask=(~text_mask).int())
+            bert_encoder = self.model.bert_encoder(h_bert).transpose(-1, -2)  # Creates prosodic text encoder (phoneme -> feature vectors)
 
             ## Function Call
             style_vector_acoustic, style_vector_prosodic = self.computeStyleVector(noise, h_bert, embedding_scale, diffusion_steps)
 
             # AdaIN, Adding information of style vector to phoneme
-            h_bert_with_style = self.model.predictor.text_encoder(h_bert, style_vector_acoustic, input_lengths, text_mask)
+            bert_encoder_with_style = self.model.predictor.text_encoder(bert_encoder, style_vector_acoustic, input_lengths, text_mask)
 
             ## Function Call
-            a_pred = self.predictDuration(h_bert_with_style, input_lengths)
+            a_pred = self.predictDuration(bert_encoder_with_style, input_lengths)
 
             # Multiply alignment matrix with h_text
             h_aligned = h_text @ a_pred.unsqueeze(0).to(self.device)  # (B, D_text, T_frames)
 
             # encode prosody
-            bert_encoder_with_style_per_frame = (h_bert_with_style.transpose(-1, -2) @ a_pred.unsqueeze(0).to(self.device))  # Multiply per-phoneme embedding (h_bert_with_style) with frame-per-phoneme matrix -> per-frame text embedding
+            bert_encoder_with_style_per_frame = (bert_encoder_with_style.transpose(-1, -2) @ a_pred.unsqueeze(0).to(self.device))  # Multiply per-phoneme embedding (bert_encoder_with_style) with frame-per-phoneme matrix -> per-frame text embedding
             f0_pred, n_pred = self.model.predictor.F0Ntrain(bert_encoder_with_style_per_frame, style_vector_acoustic)
 
         return InferenceResult(
