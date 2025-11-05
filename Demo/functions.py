@@ -12,6 +12,9 @@ import time # Used for timing operations
 import yaml
 
 import torch.nn.functional as F
+import whisper
+
+from dataclasses import dataclass
 
 from models import *
 from utils import *
@@ -23,7 +26,37 @@ from Utils.PLBERT.util import load_plbert
 
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
 
+def length_to_mask(lengths):
+    mask = torch.arange(lengths.max())  # Creates a Vector [0,1,2,3,...,x], where x = biggest value in lengths
+    mask = mask.unsqueeze(0)  # Creates a Matrix [1,x] from Vector [x]
+    mask = mask.expand(lengths.shape[0],
+                       -1)  # Expands the matrix from [1,x] to [y,x], where y = number of elements in lengths
+    mask = mask.type_as(lengths)  # Assign mask the same type as lengths
+    mask = torch.gt(mask + 1, lengths.unsqueeze(
+        1))  # gt = greater than, compares each value from lengths to a row of values in mask; unsqueeze = splits vector lengths into vectors of size 1
+    return mask  # returns a mask of shape (batch_size, max_length) where mask[i, j] = 1 if j < lengths[i] and mask[i, j] = 0 otherwise.
 
+@dataclass
+class InferenceResult:
+    h_text: torch.Tensor
+    h_aligned: torch.Tensor
+    f0_pred: torch.Tensor
+    a_pred: torch.Tensor
+    n_pred: torch.Tensor
+    style_vector_prosodic: torch.Tensor
+
+    def save(self, folder: str):
+
+        os.makedirs("outputs/latent/"+folder, exist_ok=True)
+
+        # Iterate through all fields of the dataclass
+        for name, value in self.__dict__.items():
+            if isinstance(value, torch.Tensor):
+                path = os.path.join("outputs/latent/"+folder, f"{name}.pt")
+                torch.save(value, path)
+                print(f"✅ Saved {name} -> {path}")
+            else:
+                print(f"⚠️ Skipping {name} (not a tensor)")
 
 class StyleTTS2_Helper:
     def __init__(self):
@@ -42,17 +75,6 @@ class StyleTTS2_Helper:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.textcleaner = TextCleaner()  # Lowercasing & trimming, expanding numbers & symbols, handling punctuation, phoneme conversion, tokenization
-
-    @staticmethod
-    def length_to_mask(lengths):
-        mask = torch.arange(lengths.max())  # Creates a Vector [0,1,2,3,...,x], where x = biggest value in lengths
-        mask = mask.unsqueeze(0)  # Creates a Matrix [1,x] from Vector [x]
-        mask = mask.expand(lengths.shape[0],
-                           -1)  # Expands the matrix from [1,x] to [y,x], where y = number of elements in lengths
-        mask = mask.type_as(lengths)  # Assign mask the same type as lengths
-        mask = torch.gt(mask + 1, lengths.unsqueeze(
-            1))  # gt = greater than, compares each value from lengths to a row of values in mask; unsqueeze = splits vector lengths into vectors of size 1
-        return mask  # returns a mask of shape (batch_size, max_length) where mask[i, j] = 1 if j < lengths[i] and mask[i, j] = 0 otherwise.
 
     def load_models(self, yml_path="Models/LJSpeech/config.yml"):
         config = yaml.safe_load(open(yml_path))  # YAML File with model settings and pretrained checkpoints (ASR, F0, PL-BERT)
@@ -86,7 +108,6 @@ class StyleTTS2_Helper:
     def load_checkpoints(self):
         for key in self.model:
             if key in self.params:
-                print('%s loaded' % key)
                 try:
                     self.model[key].load_state_dict(self.params[key])
                 except:
@@ -110,116 +131,105 @@ class StyleTTS2_Helper:
             clamp=False
         )
 
-    def inference(self, text, adversarial_audio_generation, interpolation_percentage, noise=torch.randn(1,1,256), diffusion_steps=5, embedding_scale=1):
+    # Turns text to tensor with token ID
+    def preprocessText(self, text):
+        # 1. Preprocessing Text
         text = text.strip()  # Removes whitespaces from beginning and end of string
         text = text.replace('"', '')  # removes " to prevent unpredictable behavior
 
+        # 2. Text -> Phoneme
         phonemes = self.global_phonemizer.phonemize([text])  # text -> list of phoneme
-        print("1. List of phonemes: ", phonemes)
         phonemes = word_tokenize(phonemes[0])  # Split into individual tokens
-        print("2. String of phonemes: ", phonemes)
         phonemes = ' '.join(phonemes)  # Join tokens together, split by a empty space
-        print("3. Final string of phonemes: ", phonemes)
 
+        # 3. Phoneme -> Token ID
         tokens = self.textcleaner(phonemes)  # Look up numeric ID per phoneme
-        print("4. ID of phonemes: ", tokens)
         tokens.insert(0, 0)  # Insert leading 0 to mark start
-        print("5. ID with leading 0: ", tokens)
+
+        # 4. Token ID -> PyTorch Tensor
         tokens = torch.LongTensor(tokens).to(self.device).unsqueeze(0)  # Converts numeric ID to PyTorch Tensor
-        print("6. Pytorch Tensor Dimension: ", tokens.shape)
 
-        with torch.no_grad():  # No training, so no gradient-descent / backpropagation
-            input_lengths = torch.LongTensor([tokens.shape[-1]]).to(
-                tokens.device)  # Number of phoneme / Length of tokens, shape[-1] = last element in list/array
+        return tokens
+
+    def predictDuration(self, h_bert_with_style, input_lengths):
+
+        # Duration Predictor, frames per phoneme
+        d_pred, _ = self.model.predictor.lstm(h_bert_with_style)  # Model temporal dependencies between phonemes, LSTM = RNN
+        d_pred = self.model.predictor.duration_proj(d_pred)  # Predict how long each phoneme lasts
+        d_pred = torch.sigmoid(d_pred).sum(axis=-1)  # Sum of duration prediction -> Result: Prediction of frame duration
+        d_pred = torch.round(d_pred.squeeze()).clamp(min=1)  # Convert duration prediction into integers, add clamp to ensure that each phoneme has at least one frame
+        d_pred[-1] += 5  # Makes last phoneme last 5 frames longer, to ensure it not being cut off too fast
+
+        # Creates predicted alignment matrix between text (phonemes) and audio frames
+        a_pred = torch.zeros(input_lengths, int(d_pred.sum().data))  # Initializes a matrix with sizes: [# of Phonemes (input_lengths)] x [Sum of total predicted frames]
+        current_frame = 0
+        for i in range(a_pred.size(0)):  # Iterates over phoneme
+            a_pred[i, current_frame:current_frame + int(d_pred[i].data)] = 1  # Changes for row-i (the i-th phoneme) all the values from current_frame to current_frame + int(d_pred[i].data) to 1
+            current_frame += int(d_pred[i].data)  # Move current_frame to new first start
+
+        return a_pred
+
+    def computeStyleVector(self, noise, h_bert, embedding_scale, diffusion_steps):
+
+        style_vector = self.sampler(
+            noise,
+            embedding=h_bert[0].unsqueeze(0),
+            embedding_scale=embedding_scale,
+            num_steps=diffusion_steps
+        ).squeeze(0)
+
+        # Split Style Vector
+        style_vector_acoustic = style_vector[:, 128:]  # Right Half = Acoustic Style Vector
+        style_vector_prosodic = style_vector[:, :128]  # Left Half = Prosodic Style Vector
+
+        return style_vector_acoustic, style_vector_prosodic
+
+    def inference(self, text, noise=torch.randn(1,1,256), diffusion_steps=5, embedding_scale=1):
+
+        # Ground Truth
+        tokens = self.preprocessText(text)
+
+        with torch.no_grad():
+            input_lengths = torch.LongTensor([tokens.shape[-1]]).to(tokens.device)  # Number of phoneme / Length of tokens, shape[-1] = last element in list/array
             text_mask = length_to_mask(input_lengths).to(tokens.device)  # Creates a bitmask based on number of phonemes
-            print("Text Mask: ", text_mask)
 
-            h_text = self.model.text_encoder(tokens, input_lengths,
-                                        text_mask)  # Creates text encoder (phoneme -> feature vectors)
-            h_bert = self.model.bert(tokens, attention_mask=(~text_mask).int())
-            bert_encoder = self.model.bert_encoder(h_bert).transpose(-1, -2)
+            h_text = self.model.text_encoder(tokens, input_lengths, text_mask)  # Creates acoustic text encoder (phoneme -> feature vectors)
+            h_bert = self.model.bert_encoder(self.model.bert(tokens, attention_mask=(~text_mask).int())).transpose(-1, -2)  # Creates prosodic text encoder (phoneme -> feature vectors)
 
-            print("Features Vectors")
-            for i in range(input_lengths):  # loop over phonemes/time steps
-                feature_vec = h_text[0, :, i]  # shape [D]
-                short_vec = feature_vec[:10]  # first 10 elements
-                print(f"{i}. {short_vec}")
-
-            if adversarial_audio_generation == 0:
-                torch.save(h_text, "latents/h_text_target.pt")
-
-            elif adversarial_audio_generation == 1:
-                torch.save(h_text, "latents/h_text_ground_truth.pt")
-
-            elif adversarial_audio_generation == 2:
-                torch.save(h_text, "latents/h_text_ground_truth.pt")
-                h_text_target = torch.load("latents/h_text_target.pt")
-
-                print("h_text shape:", h_text.shape)
-                print("h_text_target shape:", h_text_target.shape)
-
-                h_text_target = F.interpolate(h_text_target, size=h_text.size(-1), mode='linear', align_corners=False)
-
-                h_text = (1 - interpolation_percentage) * h_text + interpolation_percentage * h_text_target
-                torch.save(h_text, "latents/h_text_interpolated.pt")
-
-            elif adversarial_audio_generation == 3:
-                h_text = torch.load("latents/h_text_ground_truth.pt")
-                h_text_target = torch.load("latents/h_text_target.pt")
-
-                print("t_en shape:", h_text.shape)
-                print("t_en_target shape:", h_text_target.shape)
-
-                h_text_target = F.interpolate(h_text_target, size=h_text.size(-1), mode='linear', align_corners=False)
-
-                h_text = (1 - interpolation_percentage) * h_text + interpolation_percentage * h_text_target
-                torch.save(h_text, "latents/h_text_interpolated.pt")
-
-            s_pred = self.sampler(
-                noise,
-                embedding=h_bert[0].unsqueeze(0),
-                embedding_scale=embedding_scale,
-                num_steps=diffusion_steps
-            ).squeeze(0)
-
-            # Split Style Vector
-            style_vector_acoustic = s_pred[:, 128:]  # Right Half = Acoustic Style Vector
-            style_vector_prosodic = s_pred[:, :128]  # Left Half = Prosodic Style Vector
+            ## Function Call
+            style_vector_acoustic, style_vector_prosodic = self.computeStyleVector(noise, h_bert, embedding_scale, diffusion_steps)
 
             # AdaIN, Adding information of style vector to phoneme
-            bert_encoder_with_style = self.model.predictor.text_encoder(bert_encoder, style_vector_acoustic, input_lengths,
-                                                                   text_mask)
+            h_bert_with_style = self.model.predictor.text_encoder(h_bert, style_vector_acoustic, input_lengths, text_mask)
 
-            x, _ = self.model.predictor.lstm(
-                bert_encoder_with_style)  # Model temporal dependencies between phonemes, LSTM = RNN
-            duration = self.model.predictor.duration_proj(x)  # Predict how long each phoneme lasts
-            duration = torch.sigmoid(duration).sum(axis=-1)  # Sum of duration prediction -> Result: Prediction of frame duration
-            d_pred = torch.round(duration.squeeze()).clamp(
-                min=1)  # Convert duration prediction into integers, add clamp to ensure that each phoneme has at least one frame
-
-            d_pred[-1] += 5  # Makes last phoneme last 5 frames longer, to ensure it not being cut off too fast
-
-            # Creates predicted alignment matrix between text (phonemes) and audio frames
-            a_pred = torch.zeros(input_lengths,
-                                 int(d_pred.sum().data))  # Initializes a matrix with sizes: [# of Phonemes (input_lengths)] x [Sum of total predicted frames]
-            c_frame = 0
-            for i in range(a_pred.size(0)):  # Iterates over phoneme
-                a_pred[i, c_frame:c_frame + int(d_pred[
-                                                    i].data)] = 1  # Changes for row-i (the i-th phoneme) all the values from c_frame to c_frame + int(d_pred[i].data) to 1
-                c_frame += int(d_pred[i].data)  # Move c_frame to new first start
+            ## Function Call
+            a_pred = self.predictDuration(h_bert_with_style, input_lengths)
 
             # Multiply alignment matrix with h_text
             h_aligned = h_text @ a_pred.unsqueeze(0).to(self.device)  # (B, D_text, T_frames)
 
             # encode prosody
-            en = (bert_encoder_with_style.transpose(-1, -2) @ a_pred.unsqueeze(0).to(self.device))
-            F0_pred, N_pred = self.model.predictor.F0Ntrain(en, style_vector_acoustic)
+            bert_encoder_with_style_per_frame = (h_bert_with_style.transpose(-1, -2) @ a_pred.unsqueeze(0).to(self.device))  # Multiply per-phoneme embedding (h_bert_with_style) with frame-per-phoneme matrix -> per-frame text embedding
+            f0_pred, n_pred = self.model.predictor.F0Ntrain(bert_encoder_with_style_per_frame, style_vector_acoustic)
 
+        return InferenceResult(
+            h_text=h_text,
+            h_aligned=h_aligned,
+            f0_pred=f0_pred,
+            a_pred=a_pred,
+            n_pred=n_pred,
+            style_vector_prosodic=style_vector_prosodic,
+        )
+
+    @torch.no_grad()
+    def synthesizeSpeech(self, inferenceResult):
+
+        with torch.no_grad():
             out = self.model.decoder(
-                h_aligned,
-                F0_pred,
-                N_pred,
-                style_vector_prosodic.squeeze().unsqueeze(0)
+                inferenceResult.h_aligned,
+                inferenceResult.f0_pred,
+                inferenceResult.n_pred,
+                inferenceResult.style_vector_prosodic.squeeze().unsqueeze(0)
             )
 
         return out.squeeze().cpu().numpy()
