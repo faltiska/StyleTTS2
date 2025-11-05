@@ -151,10 +151,10 @@ class StyleTTS2_Helper:
 
         return tokens
 
-    def predictDuration(self, h_bert_with_style, input_lengths):
+    def predictDuration(self, bert_encoder_with_style, input_lengths):
 
         # Duration Predictor, frames per phoneme
-        d_pred, _ = self.model.predictor.lstm(h_bert_with_style)  # Model temporal dependencies between phonemes, LSTM = RNN
+        d_pred, _ = self.model.predictor.lstm(bert_encoder_with_style)  # Model temporal dependencies between phonemes, LSTM = RNN
         d_pred = self.model.predictor.duration_proj(d_pred)  # Predict how long each phoneme lasts
         d_pred = torch.sigmoid(d_pred).sum(axis=-1)  # Sum of duration prediction -> Result: Prediction of frame duration
         d_pred = torch.round(d_pred.squeeze()).clamp(min=1)  # Convert duration prediction into integers, add clamp to ensure that each phoneme has at least one frame
@@ -184,7 +184,7 @@ class StyleTTS2_Helper:
 
         return style_vector_acoustic, style_vector_prosodic
 
-    def inference(self, text, noise=torch.randn(1,1,256), diffusion_steps=5, embedding_scale=1):
+    def inference(self, text, noise, diffusion_steps=5, embedding_scale=1):
 
         # Ground Truth
         tokens = self.preprocessText(text)
