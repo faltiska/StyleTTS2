@@ -98,8 +98,6 @@ def main():
     diffusion_steps = 5
     embedding_scale = 1
 
-    functions = True
-
     interpolation_percentage = 0.8 # How much of Target to be used, small interpolation_percentage means more of ground_truth (Minimization)
 
     name_gt = "ground_truth"
@@ -109,53 +107,54 @@ def main():
     text_target = "No way this really works."
 
     pipe = StyleTTS2_Helper()
-
-    noise = torch.randn(1, 1, 256).to(pipe.device)
-
     pipe.load_models()  # builds self.model and loads self.params
     pipe.load_checkpoints()  # puts params into self.model
     pipe.sample_diffusion()  # builds self.sampler
 
+    noise = torch.randn(1, 1, 256).to(pipe.device)
 
-    # Ground Truth
-    tokens = pipe.preprocessText(text_target)
+    tokens_gt = pipe.preprocessText(text_gt)
+    tokens_target = pipe.preprocessText(text_target)
 
     with torch.no_grad():
-        input_lengths = torch.LongTensor([tokens.shape[-1]]).to(tokens.device)  # Number of phoneme / Length of tokens, shape[-1] = last element in list/array
-        text_mask = length_to_mask(input_lengths).to(tokens.device)  # Creates a bitmask based on number of phonemes
+        input_lengths_gt = torch.LongTensor([tokens_gt.shape[-1]]).to(tokens_gt.device)  # Number of phoneme / Length of tokens, shape[-1] = last element in list/array
+        input_lengths_target = torch.LongTensor([tokens_target.shape[-1]]).to(tokens_target.device)  # Number of phoneme / Length of tokens, shape[-1] = last element in list/array
 
-        h_text = pipe.model.text_encoder(tokens, input_lengths, text_mask)  # Creates acoustic text encoder (phoneme -> feature vectors)
-        h_bert = pipe.model.bert(tokens, attention_mask=(~text_mask).int())
-        bert_encoder = pipe.model.bert_encoder(h_bert).transpose(-1, -2)  # Creates prosodic text encoder (phoneme -> feature vectors)
+        text_mask_gt = length_to_mask(input_lengths_gt).to(tokens_gt.device)  # Creates a bitmask based on number of phonemes
+        text_mask_target = length_to_mask(input_lengths_target).to(tokens_target.device)  # Creates a bitmask based on number of phonemes
+
+        h_text_gt = pipe.model.text_encoder(tokens_gt, input_lengths_gt, text_mask_gt)  # Creates acoustic text encoder (phoneme -> feature vectors)
+        h_bert_gt = pipe.model.bert(tokens_gt, attention_mask=(~text_mask_gt).int())
+        bert_encoder = pipe.model.bert_encoder(h_bert_gt).transpose(-1, -2)  # Creates prosodic text encoder (phoneme -> feature vectors)
 
         ## Function Call
-        style_vector_acoustic, style_vector_prosodic = pipe.computeStyleVector(noise, h_bert, embedding_scale, diffusion_steps)
+        style_vector_gt_acoustic, style_vector_gt_prosodic = pipe.computeStyleVector(noise, h_bert_gt, embedding_scale, diffusion_steps)
 
         # AdaIN, Adding information of style vector to phoneme
-        bert_encoder_with_style = pipe.model.predictor.text_encoder(bert_encoder, style_vector_acoustic, input_lengths, text_mask)
+        bert_encoder_gt_with_style = pipe.model.predictor.text_encoder(bert_encoder, style_vector_gt_acoustic, input_lengths_gt, text_mask_gt)
 
         ## Function Call
-        a_pred = pipe.predictDuration(bert_encoder_with_style, input_lengths)
+        a_pred_gt = pipe.predictDuration(bert_encoder_gt_with_style, input_lengths_gt)
 
         # Multiply alignment matrix with h_text
-        h_aligned = h_text @ a_pred.unsqueeze(0).to(pipe.device)  # (B, D_text, T_frames)
+        h_aligned_gt = h_text_gt @ a_pred_gt.unsqueeze(0).to(pipe.device)  # (B, D_text, T_frames)
 
         # encode prosody
-        bert_encoder_with_style_per_frame = (bert_encoder_with_style.transpose(-1, -2) @ a_pred.unsqueeze(0).to(pipe.device))  # Multiply per-phoneme embedding (bert_encoder_with_style) with frame-per-phoneme matrix -> per-frame text embedding
-        f0_pred, n_pred = pipe.model.predictor.F0Ntrain(bert_encoder_with_style_per_frame, style_vector_acoustic)
+        bert_encoder_gt_with_style_per_frame = (bert_encoder_gt_with_style.transpose(-1, -2) @ a_pred_gt.unsqueeze(0).to(pipe.device))  # Multiply per-phoneme embedding (bert_encoder_with_style) with frame-per-phoneme matrix -> per-frame text embedding
+        f0_pred_gt, n_pred_gt = pipe.model.predictor.F0Ntrain(bert_encoder_gt_with_style_per_frame, style_vector_gt_acoustic)
 
-    inferenceResult = InferenceResult(
-        h_text=h_text,
-        h_aligned=h_aligned,
-        f0_pred=f0_pred,
-        a_pred=a_pred,
-        n_pred=n_pred,
-        style_vector_prosodic=style_vector_prosodic,
+    inferenceResult_gt = InferenceResult(
+        h_text=h_text_gt,
+        h_aligned=h_aligned_gt,
+        f0_pred=f0_pred_gt,
+        a_pred=a_pred_gt,
+        n_pred=n_pred_gt,
+        style_vector_prosodic=style_vector_gt_prosodic,
     )
 
-    audio = pipe.synthesizeSpeech(inferenceResult)
+    audio_gt = pipe.synthesizeSpeech(inferenceResult_gt)
 
-    sf.write("outputs/audio/ground_truth.wav", audio, samplerate=24000)
+    sf.write("outputs/audio/ground_truth.wav", audio_gt, samplerate=24000)
 
     """
     inferenceResult_interpolated = interpolateAllLatents(inferenceResult_groundTruth, inferenceResult_target, interpolation_percentage)
