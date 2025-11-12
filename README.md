@@ -28,15 +28,11 @@ cd StyleTTS2
 ```
 3. Install python requirements: 
 ```bash
-pip install -r requirements.txt
-```
-On Windows add:
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 -U
+uv pip install -r requirements.txt
 ```
 Also install phonemizer and espeak if you want to run the demo:
 ```bash
-pip install phonemizer
+uv pip install phonemizer
 sudo apt-get install espeak-ng
 ```
 4. Download and extract the [LJSpeech dataset](https://keithito.com/LJ-Speech-Dataset/), unzip to the data folder and upsample the data to 24 kHz. The text aligner and pitch extractor are pre-trained on 24 kHz data, but you can easily change the preprocessing and re-train them using your own preprocessing. 

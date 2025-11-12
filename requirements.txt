@@ -1,7 +1,8 @@
-SoundFile
-torchaudio
-munch
+--extra-index-url https://download.pytorch.org/whl/cu130
 torch
+torchaudio
+SoundFile
+munch
 pydub
 pyyaml
 librosa
