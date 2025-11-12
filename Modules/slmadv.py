@@ -115,37 +115,34 @@ class SLMAdversarialLoss(torch.nn.Module):
 
             _s2s_pred = torch.sigmoid(_s2s_pred_org)
 
-            if not torch.isfinite(_s2s_pred).all():
-                continue
+            valid_sample = torch.isfinite(_s2s_pred).all().item()
 
-            _dur_pred = _s2s_pred.sum(axis=-1)
+            if valid_sample:
+                _dur_pred = _s2s_pred.sum(axis=-1)
+                total_duration = torch.round(_s2s_pred.sum())
+                valid_sample = torch.isfinite(total_duration).item() and total_duration.item() > 0
 
-            total_duration = torch.round(_s2s_pred.sum())
+            if valid_sample:
+                length = int(total_duration.item())
+                t = torch.arange(0, length).unsqueeze(0).expand((len(_s2s_pred), length)).to(ref_text.device)
+                loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
+                valid_sample = torch.isfinite(_dur_pred).all().item()
 
-            if not torch.isfinite(total_duration) or total_duration.item() <= 0:
-                continue
+            if valid_sample:
+                h = torch.exp(-0.5 * torch.square(t - (length - loc.unsqueeze(-1))) / (self.sig)**2)
+                valid_sample = torch.isfinite(h).all().item()
 
-            length = int(total_duration.item())
-            t = torch.arange(0, length).expand(length)
+            if valid_sample:
+                out = torch.nn.functional.conv1d(
+                    _s2s_pred_org.unsqueeze(0),
+                    h.unsqueeze(1),
+                    padding=h.shape[-1] - 1,
+                    groups=int(_text_length),
+                )[..., :length]
+                attn_preds.append(F.softmax(out.squeeze(), dim=0))
 
-            t = torch.arange(0, length).unsqueeze(0).expand((len(_s2s_pred), length)).to(ref_text.device)
-            loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
-
-            if not torch.isfinite(_dur_pred).all():
-                continue
-
-            h = torch.exp(-0.5 * torch.square(t - (length - loc.unsqueeze(-1))) / (self.sig)**2)
-
-            if not torch.isfinite(h).all():
-                continue
-
-            out = torch.nn.functional.conv1d(_s2s_pred_org.unsqueeze(0),
-                                         h.unsqueeze(1),
-                                         padding=h.shape[-1] - 1, groups=int(_text_length))[..., :length]
-            attn_preds.append(F.softmax(out.squeeze(), dim=0))
-
-            output_lengths.append(length)
-            valid_batch_indices.append(bib)
+                output_lengths.append(length)
+                valid_batch_indices.append(bib)
 
         if len(output_lengths) == 0:
             raise SkipSLMAdversarial("skip slmadv")
