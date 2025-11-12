@@ -1153,9 +1153,12 @@ def main(config_path):
 
                         x, _ = predictor_module.lstm(d)
                         duration = predictor_module.duration_proj(x)
-
+                        duration = torch.nan_to_num(
+                            duration, nan=0.0, posinf=20.0, neginf=-20.0
+                        )
                         duration = torch.sigmoid(duration).sum(axis=-1)
-                        duration = torch.nan_to_num(duration, nan=1.0, posinf=1.0, neginf=1.0)
+                        if not torch.isfinite(duration).all():
+                            duration = torch.ones_like(duration)
                         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
                         pred_dur[-1] += 5
