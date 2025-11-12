@@ -1155,6 +1155,7 @@ def main(config_path):
                         duration = predictor_module.duration_proj(x)
 
                         duration = torch.sigmoid(duration).sum(axis=-1)
+                        duration = torch.nan_to_num(duration, nan=1.0, posinf=1.0, neginf=1.0)
                         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
                         pred_dur[-1] += 5
