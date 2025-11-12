@@ -104,42 +104,68 @@ class SLMAdversarialLoss(torch.nn.Module):
             text_mask,
         )
         
-        bib = 0
-
         output_lengths = []
         attn_preds = []
-        
+        valid_batch_indices = []
+
         # differentiable duration modeling
-        for _s2s_pred, _text_length in zip(d, ref_lengths):
+        for bib, (_s2s_pred, _text_length) in enumerate(zip(d, ref_lengths)):
 
             _s2s_pred_org = _s2s_pred[:_text_length, :]
 
             _s2s_pred = torch.sigmoid(_s2s_pred_org)
-            _dur_pred = _s2s_pred.sum(axis=-1)
 
-            length = int(torch.round(_s2s_pred.sum()).item())
-            t = torch.arange(0, length).expand(length)
+            valid_sample = torch.isfinite(_s2s_pred).all().item()
 
-            t = torch.arange(0, length).unsqueeze(0).expand((len(_s2s_pred), length)).to(ref_text.device)
-            loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
+            if valid_sample:
+                _dur_pred = _s2s_pred.sum(axis=-1)
+                total_duration = torch.round(_s2s_pred.sum())
+                valid_sample = torch.isfinite(total_duration).item() and total_duration.item() > 0
 
-            h = torch.exp(-0.5 * torch.square(t - (length - loc.unsqueeze(-1))) / (self.sig)**2)
+            if valid_sample:
+                length = int(total_duration.item())
+                t = torch.arange(0, length).unsqueeze(0).expand((len(_s2s_pred), length)).to(ref_text.device)
+                loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
+                valid_sample = torch.isfinite(_dur_pred).all().item()
 
-            out = torch.nn.functional.conv1d(_s2s_pred_org.unsqueeze(0), 
-                                         h.unsqueeze(1), 
-                                         padding=h.shape[-1] - 1, groups=int(_text_length))[..., :length]
-            attn_preds.append(F.softmax(out.squeeze(), dim=0))
+            if valid_sample:
+                h = torch.exp(-0.5 * torch.square(t - (length - loc.unsqueeze(-1))) / (self.sig)**2)
+                valid_sample = torch.isfinite(h).all().item()
 
-            output_lengths.append(length)
+            if valid_sample:
+                out = torch.nn.functional.conv1d(
+                    _s2s_pred_org.unsqueeze(0),
+                    h.unsqueeze(1),
+                    padding=h.shape[-1] - 1,
+                    groups=int(_text_length),
+                )[..., :length]
+                attn_preds.append(F.softmax(out.squeeze(), dim=0))
+
+                output_lengths.append(length)
+                valid_batch_indices.append(bib)
+
+        if len(output_lengths) == 0:
+            raise SkipSLMAdversarial("skip slmadv")
+
+        index_tensor = torch.tensor(valid_batch_indices, dtype=torch.long, device='cpu')
+        ref_lengths = ref_lengths.index_select(0, index_tensor.to(ref_lengths.device))
+        ref_text = ref_text.index_select(0, index_tensor.to(ref_text.device))
+        text_mask = length_to_mask(ref_lengths).to(ref_text.device)
+        ref_text = ref_text.masked_fill(text_mask, pad_token_id)
+        s_preds = s_preds.index_select(0, index_tensor.to(s_preds.device))
+        s_dur = s_preds[:, 128:]
+        d_en = d_en.index_select(0, index_tensor.to(d_en.device))
+        mel_input_length = mel_input_length.index_select(0, index_tensor.to(mel_input_length.device))
+        waves = [waves[i] for i in valid_batch_indices]
 
         max_len = max(output_lengths)
-        
+
         with torch.no_grad():
             t_en = self.model.text_encoder(ref_text, ref_lengths, text_mask)
-            
-        s2s_attn = torch.zeros(len(ref_lengths), int(ref_lengths.max()), max_len).to(ref_text.device)
-        for bib in range(len(output_lengths)):
-            s2s_attn[bib, :ref_lengths[bib], :output_lengths[bib]] = attn_preds[bib]
+
+        s2s_attn = torch.zeros(len(output_lengths), int(ref_lengths.max()), max_len).to(ref_text.device)
+        for idx in range(len(output_lengths)):
+            s2s_attn[idx, :ref_lengths[idx], :output_lengths[idx]] = attn_preds[idx]
 
         asr_pred = t_en @ s2s_attn
 
@@ -176,7 +202,7 @@ class SLMAdversarialLoss(torch.nn.Module):
             random_start = np.random.randint(0, mel_length_gt - mel_len)
             y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
             wav.append(torch.from_numpy(y).to(ref_text.device))
-            
+
             if len(wav) >= self.batch_percentage * len(waves): # prevent OOM due to longer lengths
                 break
 
