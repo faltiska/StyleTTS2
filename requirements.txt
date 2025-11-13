@@ -17,6 +17,7 @@ typing
 typing-extensions
 noisereduce
 pandas
+tensorflow
 tensorboard
 nvitop
 openai-whisper

@@ -47,7 +47,7 @@ class TextCleaner:
             try:
                 indexes.append(mapping[char])
             except KeyError:
-                print(f"(TextCleaner) Warning: Phoneme '{char}' not found in dictionary. Text: {display_text}")
+                print(f"(TextCleaner) Warning: Phoneme '{char}' (ASCII: {ord(char)}) not found in dictionary. Text: {display_text}")
         return indexes
 
     @property

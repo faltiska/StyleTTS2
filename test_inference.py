@@ -4,16 +4,14 @@ StyleTTS2 Text-to-Speech Script
 Simple text to speech conversion using StyleTTS2
 """
 
+import argparse
 import os
 import sys
-import argparse
-import torch
-import soundfile as sf
-import yaml
 import time
-from dataclasses import dataclass
-from nltk.tokenize import word_tokenize
+
 import phonemizer
+import soundfile as sf
+from nltk.tokenize import word_tokenize
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

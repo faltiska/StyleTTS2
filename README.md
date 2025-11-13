@@ -41,7 +41,7 @@ For LibriTTS, you will need to combine train-clean-360 with train-clean-100 and 
 ## Training
 First stage training:
 ```bash
-accelerate launch train_first.py --config_path ./Configs/config.yml
+accelerate launch --mixed_precision=bf16 train_first.py --config_path ./Configs/config.yml
 ```
 Second stage training **(DDP version not working, so the current version uses DP, again see [#7](https://github.com/yl4579/StyleTTS2/issues/7) if you want to help)**:
 ```bash
@@ -80,7 +80,9 @@ Please make sure you have the LibriTTS checkpoint downloaded and unzipped under 
 
 If you are using a **single GPU** (because the script doesn't work with DDP) and want to save training speed and VRAM, you can do (thank [@korakoe](https://github.com/korakoe) for making the script at [#100](https://github.com/yl4579/StyleTTS2/pull/100)):
 ```bash
-accelerate launch --mixed_precision=fp16 --num_processes=1 train_finetune_accelerate.py --config_path ./Configs/config_ft.yml
+accelerate launch --mixed_precision=bf16 --num_processes=1 train_finetune_accelerate.py --config_path ./Configs/config_ft.yml
+or 
+accelerate launch --mixed_precision=bf16 --dynamo_backend inductor --num_processes=1 train_finetune_accelerate.py --config_path ./Configs/config_ft.yml
 ```
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yl4579/StyleTTS2/blob/main/Colab/StyleTTS2_Finetune_Demo.ipynb)
 
