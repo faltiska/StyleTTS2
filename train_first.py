@@ -440,8 +440,26 @@ def main(config_path):
             iters = iters + 1
             
             if (i+1)%log_interval == 0 and accelerator.is_main_process:
-                log_print ('Epoch [%d/%d], Step [%d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f'
-                        %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, loss_gen_all, d_loss, loss_mono, loss_s2s, loss_slm), logger)
+                elapsed_time = time.time() - start_time
+                steps_per_epoch = len(train_list) // batch_size
+                total_steps = epochs * steps_per_epoch
+                current_step = epoch * steps_per_epoch + (i + 1)
+                avg_step_time = elapsed_time / (i + 1)
+                
+                # Epoch ETA
+                remaining_steps_epoch = steps_per_epoch - (i + 1)
+                epoch_eta_seconds = remaining_steps_epoch * avg_step_time
+                epoch_eta_minutes = int(epoch_eta_seconds // 60)
+                epoch_eta_str = f'{epoch_eta_minutes}m'
+                
+                # Total ETA
+                remaining_steps = total_steps - current_step
+                eta_seconds = remaining_steps * avg_step_time
+                eta_hours = int(eta_seconds // 3600)
+                eta_minutes = int((eta_seconds % 3600) // 60)
+                eta_str = f'{eta_hours}h{eta_minutes:02d}m' if eta_hours > 0 else f'{eta_minutes}m'
+                
+                print(f'\rEpoch [{epoch+1}/{epochs}], Step [{i+1}/{steps_per_epoch}], Mel: {running_loss / log_interval:.3f}, Gen: {loss_gen_all:.3f}, Disc: {d_loss:.3f}, Mono: {loss_mono:.3f}, S2S: {loss_s2s:.3f}, SLM: {loss_slm:.3f}, ETA: {epoch_eta_str} / {eta_str}', end='', flush=True)
                 
                 writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
                 writer.add_scalar('train/gen_loss', loss_gen_all, iters)
@@ -451,8 +469,6 @@ def main(config_path):
                 writer.add_scalar('train/slm_loss', loss_slm, iters)
 
                 running_loss = 0
-                
-                print('Time elasped:', time.time()-start_time)
                                 
         loss_test = 0
 

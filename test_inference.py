@@ -53,7 +53,7 @@ class StyleTTS2_Helper:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.textcleaner = TextCleaner()
 
-    def load_models(self, yml_path="Models/LJSpeech/config.yml"):
+    def load_models(self, yml_path="Models/LJSpeech/config.yml", checkpoint_path="Models/LJSpeech/epoch_1st_00004.pth"):
         config = yaml.safe_load(open(yml_path))
         
         ASR_config = config.get('ASR_config', False)
@@ -76,7 +76,7 @@ class StyleTTS2_Helper:
         _ = [self.model[key].eval() for key in self.model]
         _ = [self.model[key].to(self.device) for key in self.model]
         
-        params_whole = torch.load("Models/LJSpeech/epoch_2nd_00100.pth", map_location='cpu')
+        params_whole = torch.load(checkpoint_path, map_location='cpu')
         self.params = params_whole['net']
 
     def load_checkpoints(self):
@@ -180,6 +180,7 @@ def main():
     parser = argparse.ArgumentParser(description='StyleTTS2 Text-to-Speech')
     parser.add_argument('text', help='Text to convert to speech')
     parser.add_argument('--output', default='output.wav', help='Output audio file')
+    parser.add_argument('--checkpoint', default='Models/LJSpeech/epoch_1st_00002.pth', help='Checkpoint file to load')
     
     args = parser.parse_args()
     
@@ -189,7 +190,7 @@ def main():
     print("Loading StyleTTS2 models...")
     pipe = StyleTTS2_Helper()
     print(f"Using device: {pipe.device}")
-    pipe.load_models()
+    pipe.load_models(checkpoint_path=args.checkpoint)
     pipe.load_checkpoints()
     pipe.sample_diffusion()
     print("Models loaded successfully!")

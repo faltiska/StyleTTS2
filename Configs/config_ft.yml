@@ -4,8 +4,8 @@ log_interval: 10
 device: "cuda"
 mixed_precision: auto
 epochs: 50 # number of finetuning epoch (1 hour of data)
-batch_size: 1
-max_len: 240 # maximum number of frames
+batch_size: 2 # can't be 1, I get "IndexError: Dimension out of range (expected to be in range of [-1, 0], but got 1)" 
+max_len: 140 # maximum number of frames that fit on nVidia RTX 4000 SFF (18.4 usable RAM) 
 pretrained_model: "Models/LibriTTS/epochs_2nd_00020.pth"
 second_stage_load_pretrained: true # set to true if the pre-trained model is for 2nd stage
 load_only_params: true # set to true if do not want to load epoch numbers and optimizer parameters

@@ -24,6 +24,7 @@ model_params:
    hidden_dim: 256
    n_token: 178
    token_embedding_dim: 512
+   location_kernel_size: 63
 
 optimizer_params:
   lr: 0.0005
