@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
-from torch.nn.utils import parametrizations.weight_norm, remove_weight_norm, spectral_norm
+from torch.nn import Conv1d, ConvTranspose1d
+from torch.nn.utils import weight_norm, remove_weight_norm
 from .utils import init_weights, get_padding
 
 import math
@@ -27,21 +27,21 @@ class AdaINResBlock1(torch.nn.Module):
     def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5), style_dim=64):
         super(AdaINResBlock1, self).__init__()
         self.convs1 = nn.ModuleList([
-            parametrizations.weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=dilation[0],
+            weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=dilation[0],
                                padding=get_padding(kernel_size, dilation[0]))),
-            parametrizations.weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=dilation[1],
+            weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=dilation[1],
                                padding=get_padding(kernel_size, dilation[1]))),
-            parametrizations.weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=dilation[2],
+            weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=dilation[2],
                                padding=get_padding(kernel_size, dilation[2])))
         ])
         self.convs1.apply(init_weights)
 
         self.convs2 = nn.ModuleList([
-            parametrizations.weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=1,
+            weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=1,
                                padding=get_padding(kernel_size, 1))),
-            parametrizations.weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=1,
+            weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=1,
                                padding=get_padding(kernel_size, 1))),
-            parametrizations.weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=1,
+            weight_norm(Conv1d(channels, channels, kernel_size, 1, dilation=1,
                                padding=get_padding(kernel_size, 1)))
         ])
         self.convs2.apply(init_weights)
@@ -74,10 +74,10 @@ class AdaINResBlock1(torch.nn.Module):
         return x
 
     def remove_weight_norm(self):
-        for l in self.convs1:
-            remove_weight_norm(l)
-        for l in self.convs2:
-            remove_weight_norm(l)
+        for layer in self.convs1:
+            remove_weight_norm(layer)
+        for layer in self.convs2:
+            remove_weight_norm(layer)
     
 class SineGen(torch.nn.Module):
     """ Definition of sine generator
@@ -193,8 +193,7 @@ class SineGen(torch.nn.Module):
         output sine_tensor: tensor(batchsize=1, length, dim)
         output uv: tensor(batchsize=1, length, 1)
         """
-        f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim,
-                             device=f0.device)
+        torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
         # fundamental component
         fn = torch.multiply(f0, torch.FloatTensor([[range(1, self.harmonic_num + 2)]]).to(f0.device))
 
@@ -314,7 +313,7 @@ class Generator(torch.nn.Module):
             for j, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes)):
                 self.resblocks.append(resblock(ch, k, d, style_dim))
 
-        self.conv_post = parametrizations.weight_norm(Conv1d(ch, 1, 7, 1, padding=3))
+        self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3))
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
 
@@ -348,10 +347,10 @@ class Generator(torch.nn.Module):
 
     def remove_weight_norm(self):
         print('Removing weight norm...')
-        for l in self.ups:
-            remove_weight_norm(l)
-        for l in self.resblocks:
-            l.remove_weight_norm()
+        for layer in self.ups:
+            remove_weight_norm(layer)
+        for layer in self.resblocks:
+            layer.remove_weight_norm()
         remove_weight_norm(self.conv_pre)
         remove_weight_norm(self.conv_post)
 
@@ -370,16 +369,16 @@ class AdainResBlk1d(nn.Module):
         if upsample == 'none':
             self.pool = nn.Identity()
         else:
-            self.pool = parametrizations.weight_norm(nn.ConvTranspose1d(dim_in, dim_in, kernel_size=3, stride=2, groups=dim_in, padding=1, output_padding=1))
+            self.pool = weight_norm(nn.ConvTranspose1d(dim_in, dim_in, kernel_size=3, stride=2, groups=dim_in, padding=1, output_padding=1))
         
         
     def _build_weights(self, dim_in, dim_out, style_dim):
-        self.conv1 = parametrizations.weight_norm(nn.Conv1d(dim_in, dim_out, 3, 1, 1))
-        self.conv2 = parametrizations.weight_norm(nn.Conv1d(dim_out, dim_out, 3, 1, 1))
+        self.conv1 = weight_norm(nn.Conv1d(dim_in, dim_out, 3, 1, 1))
+        self.conv2 = weight_norm(nn.Conv1d(dim_out, dim_out, 3, 1, 1))
         self.norm1 = AdaIN1d(style_dim, dim_in)
         self.norm2 = AdaIN1d(style_dim, dim_out)
         if self.learned_sc:
-            self.conv1x1 = parametrizations.weight_norm(nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False))
+            self.conv1x1 = weight_norm(nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False))
 
     def _shortcut(self, x):
         x = self.upsample(x)
@@ -431,12 +430,12 @@ class Decoder(nn.Module):
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
 
-        self.F0_conv = parametrizations.weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
+        self.F0_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
         
-        self.N_conv = parametrizations.weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
+        self.N_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
         
         self.asr_res = nn.Sequential(
-            parametrizations.weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
+            weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
         )
         
         

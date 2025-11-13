@@ -2,108 +2,188 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
+
+def _clone_if_grad(tensor, *, force=False):
+    if isinstance(tensor, torch.Tensor) and (force or tensor.requires_grad):
+        return tensor.clone()
+    return tensor
+
+
+class SkipSLMAdversarial(Exception):
+    pass
+
 class SLMAdversarialLoss(torch.nn.Module):
 
-    def __init__(self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5):
+    def __init__(
+        self,
+        model,
+        wl,
+        sampler,
+        min_len,
+        max_len,
+        batch_percentage=0.5,
+        skip_update=10,
+        sig=1.5,
+        accelerator=None,
+        model_unwrapped=None,
+    ):
         super(SLMAdversarialLoss, self).__init__()
         self.model = model
         self.wl = wl
         self.sampler = sampler
-        
+
         self.min_len = min_len
         self.max_len = max_len
         self.batch_percentage = batch_percentage
-        
+
         self.sig = sig
         self.skip_update = skip_update
+        self.accelerator = accelerator
+        self.model_unwrapped = model_unwrapped or {}
+
+    def _module(self, key):
+        if isinstance(self.model_unwrapped, dict) and key in self.model_unwrapped:
+            return self.model_unwrapped[key]
+        module = self.model[key] if isinstance(self.model, dict) else getattr(self.model, key)
+        if hasattr(module, "module"):
+            return module.module
+        return module
         
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
+        bert_module = self._module('bert')
+        bert_config = getattr(bert_module, "config", None)
+        max_positions = getattr(bert_config, "max_position_embeddings", None) if bert_config is not None else None
+        pad_token_id = getattr(bert_config, "pad_token_id", 0) if bert_config is not None else 0
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        if max_positions is not None:
+            effective_max_positions = min(max_positions, ref_text.size(1))
+            if ref_text.size(1) > effective_max_positions:
+                ref_text = ref_text[:, :effective_max_positions].contiguous()
+            if ref_lengths.max().item() > effective_max_positions:
+                ref_lengths = ref_lengths.clamp(max=effective_max_positions)
+
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
+        if pad_token_id is not None:
+            ref_text = ref_text.masked_fill(text_mask, pad_token_id)
+
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2) 
+        bert_dur = _clone_if_grad(bert_dur)
+        bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
+        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
         
         if use_ind and np.random.rand() < 0.5:
             s_preds = s_trg
         else:
             num_steps = np.random.randint(3, 5)
             if ref_s is not None:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device), 
-                      embedding=bert_dur,
-                      embedding_scale=1,
-                               features=ref_s, # reference from the same speaker as the embedding
-                         embedding_mask_proba=0.1,
-                         num_steps=num_steps).squeeze(1)
+                s_preds = self.sampler(
+                    noise=torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
+                    embedding=bert_dur_sampler,
+                    embedding_scale=1,
+                    features=_clone_if_grad(ref_s, force=True),
+                    embedding_mask_proba=0.1,
+                    num_steps=num_steps,
+                ).squeeze(1)
             else:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device), 
-                      embedding=bert_dur,
+                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
+                      embedding=bert_dur_sampler,
                       embedding_scale=1,
                          embedding_mask_proba=0.1,
                          num_steps=num_steps).squeeze(1)
             
         s_dur = s_preds[:, 128:]
-        s = s_preds[:, :128]
+        s_preds[:, :128]
         
-        d, _ = self.model.predictor(d_en, s_dur, 
-                                                ref_lengths, 
-                                                torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device), 
-                                                text_mask)
+        d, _ = self.model.predictor(
+            _clone_if_grad(d_en),
+            _clone_if_grad(s_dur),
+            ref_lengths,
+            torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device),
+            text_mask,
+        )
         
-        bib = 0
-
         output_lengths = []
         attn_preds = []
-        
+        valid_batch_indices = []
+
         # differentiable duration modeling
-        for _s2s_pred, _text_length in zip(d, ref_lengths):
+        for bib, (_s2s_pred, _text_length) in enumerate(zip(d, ref_lengths)):
 
             _s2s_pred_org = _s2s_pred[:_text_length, :]
 
             _s2s_pred = torch.sigmoid(_s2s_pred_org)
-            _dur_pred = _s2s_pred.sum(axis=-1)
 
-            l = int(torch.round(_s2s_pred.sum()).item())
-            t = torch.arange(0, l).expand(l)
+            valid_sample = torch.isfinite(_s2s_pred).all().item()
 
-            t = torch.arange(0, l).unsqueeze(0).expand((len(_s2s_pred), l)).to(ref_text.device)
-            loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
+            if valid_sample:
+                _dur_pred = _s2s_pred.sum(axis=-1)
+                total_duration = torch.round(_s2s_pred.sum())
+                valid_sample = torch.isfinite(total_duration).item() and total_duration.item() > 0
 
-            h = torch.exp(-0.5 * torch.square(t - (l - loc.unsqueeze(-1))) / (self.sig)**2)
+            if valid_sample:
+                length = int(total_duration.item())
+                t = torch.arange(0, length).unsqueeze(0).expand((len(_s2s_pred), length)).to(ref_text.device)
+                loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
+                valid_sample = torch.isfinite(_dur_pred).all().item()
 
-            out = torch.nn.functional.conv1d(_s2s_pred_org.unsqueeze(0), 
-                                         h.unsqueeze(1), 
-                                         padding=h.shape[-1] - 1, groups=int(_text_length))[..., :l]
-            attn_preds.append(F.softmax(out.squeeze(), dim=0))
+            if valid_sample:
+                h = torch.exp(-0.5 * torch.square(t - (length - loc.unsqueeze(-1))) / (self.sig)**2)
+                valid_sample = torch.isfinite(h).all().item()
 
-            output_lengths.append(l)
+            if valid_sample:
+                out = torch.nn.functional.conv1d(
+                    _s2s_pred_org.unsqueeze(0),
+                    h.unsqueeze(1),
+                    padding=h.shape[-1] - 1,
+                    groups=int(_text_length),
+                )[..., :length]
+                attn_preds.append(F.softmax(out.squeeze(), dim=0))
+
+                output_lengths.append(length)
+                valid_batch_indices.append(bib)
+
+        if len(output_lengths) == 0:
+            raise SkipSLMAdversarial("skip slmadv")
+
+        index_tensor = torch.tensor(valid_batch_indices, dtype=torch.long, device='cpu')
+        ref_lengths = ref_lengths.index_select(0, index_tensor.to(ref_lengths.device))
+        ref_text = ref_text.index_select(0, index_tensor.to(ref_text.device))
+        text_mask = length_to_mask(ref_lengths).to(ref_text.device)
+        ref_text = ref_text.masked_fill(text_mask, pad_token_id)
+        s_preds = s_preds.index_select(0, index_tensor.to(s_preds.device))
+        s_dur = s_preds[:, 128:]
+        d_en = d_en.index_select(0, index_tensor.to(d_en.device))
+        mel_input_length = mel_input_length.index_select(0, index_tensor.to(mel_input_length.device))
+        waves = [waves[i] for i in valid_batch_indices]
 
         max_len = max(output_lengths)
-        
+
         with torch.no_grad():
             t_en = self.model.text_encoder(ref_text, ref_lengths, text_mask)
-            
-        s2s_attn = torch.zeros(len(ref_lengths), int(ref_lengths.max()), max_len).to(ref_text.device)
-        for bib in range(len(output_lengths)):
-            s2s_attn[bib, :ref_lengths[bib], :output_lengths[bib]] = attn_preds[bib]
+
+        s2s_attn = torch.zeros(len(output_lengths), int(ref_lengths.max()), max_len).to(ref_text.device)
+        for idx in range(len(output_lengths)):
+            s2s_attn[idx, :ref_lengths[idx], :output_lengths[idx]] = attn_preds[idx]
 
         asr_pred = t_en @ s2s_attn
 
-        _, p_pred = self.model.predictor(d_en, s_dur, 
-                                                ref_lengths, 
-                                                s2s_attn, 
-                                                text_mask)
+        _, p_pred = self.model.predictor(
+            _clone_if_grad(d_en),
+            _clone_if_grad(s_dur),
+            ref_lengths,
+            s2s_attn,
+            text_mask,
+        )
         
         mel_len = max(int(min(output_lengths) / 2 - 1), self.min_len // 2)
         mel_len = min(mel_len, self.max_len // 2)
         
         # get clips
-        
         en = []
         p_en = []
         sp = []
-        
-        F0_fakes = []
-        N_fakes = []
-        
         wav = []
 
         for bib in range(len(output_lengths)):
@@ -122,20 +202,37 @@ class SLMAdversarialLoss(torch.nn.Module):
             random_start = np.random.randint(0, mel_length_gt - mel_len)
             y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
             wav.append(torch.from_numpy(y).to(ref_text.device))
-            
+
             if len(wav) >= self.batch_percentage * len(waves): # prevent OOM due to longer lengths
                 break
 
-        if len(sp) <= 1:
-            return None
+        batch_size_tensor = torch.tensor([len(sp)], device=ref_text.device)
+        if self.accelerator is not None:
+            global_min_batch = self.accelerator.gather(batch_size_tensor).min().item()
+        else:
+            global_min_batch = batch_size_tensor.min().item()
+
+        if global_min_batch <= 1:
+            raise SkipSLMAdversarial("skip slmadv")
             
         sp = torch.stack(sp)
         wav = torch.stack(wav).float()
         en = torch.stack(en)
         p_en = torch.stack(p_en)
         
-        F0_fake, N_fake = self.model.predictor.F0Ntrain(p_en, sp[:, 128:])
-        y_pred = self.model.decoder(en, F0_fake, N_fake, sp[:, :128])
+        predictor_ddp = self.model.predictor
+        predictor_module = self._module('predictor')
+        decoder_module = self._module('decoder')
+
+        prosody_style = _clone_if_grad(sp[:, 128:])
+        acoustic_style = _clone_if_grad(sp[:, :128])
+
+        F0_fake, N_fake = predictor_ddp(
+            _clone_if_grad(p_en), prosody_style, forward_mode="f0"
+        )
+        y_pred = decoder_module(
+            _clone_if_grad(en), F0_fake, N_fake, acoustic_style
+        )
         
         # discriminator loss
         if (iters + 1) % self.skip_update == 0:

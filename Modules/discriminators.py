@@ -1,9 +1,8 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.nn import Conv1d, AvgPool1d, Conv2d
-from torch.nn.utils import spectral_norm
-from torch.nn.utils.parametrizations import weight_norm
+from torch.nn import Conv1d, Conv2d
+from torch.nn.utils import weight_norm, spectral_norm
 
 from .utils import get_padding
 
@@ -22,8 +21,6 @@ def stft(x, fft_size, hop_size, win_length, window):
     """
     x_stft = torch.stft(x, fft_size, hop_size, win_length, window,
             return_complex=True)
-    real = x_stft[..., 0]
-    imag = x_stft[..., 1]
 
     return torch.abs(x_stft).transpose(2, 1)
 
@@ -32,7 +29,7 @@ class SpecDiscriminator(nn.Module):
 
     def __init__(self, fft_size=1024, shift_size=120, win_length=600, window="hann_window", use_spectral_norm=False):
         super(SpecDiscriminator, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm if use_spectral_norm is False else spectral_norm
         self.fft_size = fft_size
         self.shift_size = shift_size
         self.win_length = win_length
@@ -98,7 +95,7 @@ class DiscriminatorP(torch.nn.Module):
     def __init__(self, period, kernel_size=5, stride=3, use_spectral_norm=False):
         super(DiscriminatorP, self).__init__()
         self.period = period
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm if use_spectral_norm is False else spectral_norm
         self.convs = nn.ModuleList([
             norm_f(Conv2d(1, 32, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
             norm_f(Conv2d(32, 128, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
@@ -119,8 +116,8 @@ class DiscriminatorP(torch.nn.Module):
             t = t + n_pad
         x = x.view(b, c, t // self.period, self.period)
 
-        for l in self.convs:
-            x = l(x)
+        for layer in self.convs:
+            x = layer(x)
             x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
         x = self.conv_post(x)
@@ -156,34 +153,76 @@ class MultiPeriodDiscriminator(torch.nn.Module):
 
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
     
-class WavLMDiscriminator(nn.Module):
-    """docstring for Discriminator."""
+class WhisperDiscriminator(nn.Module):
+    """Convolutional discriminator operating on Whisper encoder features."""
 
-    def __init__(self, slm_hidden=768, 
-                 slm_layers=13, 
-                 initial_channel=64, 
-                 use_spectral_norm=False):
-        super(WavLMDiscriminator, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        self.pre = norm_f(Conv1d(slm_hidden * slm_layers, initial_channel, 1, 1, padding=0))
-        
-        self.convs = nn.ModuleList([
-            norm_f(nn.Conv1d(initial_channel, initial_channel * 2, kernel_size=5, padding=2)),
-            norm_f(nn.Conv1d(initial_channel * 2, initial_channel * 4, kernel_size=5, padding=2)),
-            norm_f(nn.Conv1d(initial_channel * 4, initial_channel * 4, 5, 1, padding=2)),
-        ])
+    def __init__(
+        self,
+        slm_hidden=512,
+        slm_layers=7,
+        initial_channel=64,
+        use_spectral_norm=False,
+    ):
+        super().__init__()
+        self.initial_channel = initial_channel
+        self._norm_f = weight_norm if use_spectral_norm is False else spectral_norm
+        in_channels = None
+        if slm_hidden is not None and slm_layers is not None:
+            in_channels = slm_hidden * slm_layers
+        self._pre_channels = in_channels
+        self.pre = (
+            self._norm_f(Conv1d(in_channels, initial_channel, 1, 1, padding=0))
+            if in_channels is not None
+            else None
+        )
 
-        self.conv_post = norm_f(Conv1d(initial_channel * 4, 1, 3, 1, padding=1))
-        
+        self.convs = nn.ModuleList(
+            [
+                self._norm_f(
+                    nn.Conv1d(
+                        initial_channel, initial_channel * 2, kernel_size=5, padding=2
+                    )
+                ),
+                self._norm_f(
+                    nn.Conv1d(
+                        initial_channel * 2,
+                        initial_channel * 4,
+                        kernel_size=5,
+                        padding=2,
+                    )
+                ),
+                self._norm_f(
+                    nn.Conv1d(
+                        initial_channel * 4, initial_channel * 4, 5, 1, padding=2
+                    )
+                ),
+            ]
+        )
+
+        self.conv_post = self._norm_f(Conv1d(initial_channel * 4, 1, 3, 1, padding=1))
+
+    def _build_pre(self, channels, device, dtype):
+        conv = Conv1d(channels, self.initial_channel, 1, 1, padding=0, bias=True)
+        conv = conv.to(device=device, dtype=dtype)
+        self.pre = self._norm_f(conv)
+        self._pre_channels = channels
+
     def forward(self, x):
+        if self.pre is None or x.size(1) != self._pre_channels:
+            self._build_pre(x.size(1), x.device, x.dtype)
+
         x = self.pre(x)
-        
+
         fmap = []
-        for l in self.convs:
-            x = l(x)
+        for layer in self.convs:
+            x = layer(x)
             x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
         x = self.conv_post(x)
         x = torch.flatten(x, 1, -1)
 
         return x
+
+
+# Backwards compatibility with previous name
+WavLMDiscriminator = WhisperDiscriminator
