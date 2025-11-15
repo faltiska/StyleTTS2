@@ -35,15 +35,25 @@ Also install phonemizer and espeak if you want to run the demo:
 uv pip install phonemizer
 sudo apt-get install espeak-ng
 ```
+
+For windows, set this env var
+```commandline
+set PYTHONUTF8=1
+```
+
 4. Download and extract the [LJSpeech dataset](https://keithito.com/LJ-Speech-Dataset/), unzip to the data folder and upsample the data to 24 kHz. The text aligner and pitch extractor are pre-trained on 24 kHz data, but you can easily change the preprocessing and re-train them using your own preprocessing. 
 For LibriTTS, you will need to combine train-clean-360 with train-clean-100 and rename the folder train-clean-460 (see [val_list_libritts.txt](https://github.com/yl4579/StyleTTS/blob/main/Data/val_list_libritts.txt) as an example).
 
 ## Training
+Data preparation:
+```commandline
+python prepare_data
+```
+Change the script as needed, to take your own corpus 
+
 First stage training:
 ```bash
 accelerate launch train_first.py --config_path ./Configs/config.yml
-or 
-accelerate launch --dynamo_backend inductor train_first.py --config_path ./Configs/config.yml
 ```
 Second stage training **(DDP version not working, so the current version uses DP, again see [#7](https://github.com/yl4579/StyleTTS2/issues/7) if you want to help)**:
 ```bash
@@ -83,9 +93,14 @@ Please make sure you have the LibriTTS checkpoint downloaded and unzipped under 
 If you are using a **single GPU** (because the script doesn't work with DDP) and want to save training speed and VRAM, you can do (thank [@korakoe](https://github.com/korakoe) for making the script at [#100](https://github.com/yl4579/StyleTTS2/pull/100)):
 ```bash
 accelerate launch --num_processes=1 train_finetune_accelerate.py --config_path ./Configs/config_ft.yml
-or 
-accelerate launch --dynamo_backend inductor --num_processes=1 train_finetune_accelerate.py --config_path ./Configs/config_ft.yml
 ```
+
+Monitor your training with Tensorboard:
+```commandline
+uv pip install tensorboard
+tensorboard --logdir=Models/<your-model>/tensorboard
+```
+
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yl4579/StyleTTS2/blob/main/Colab/StyleTTS2_Finetune_Demo.ipynb)
 
 The training scripts now default to an automatic mixed-precision mode that selects bfloat16 on Hopper- and Blackwell-class GPUs (H100/H200, B100/B200) while retaining fp16 on earlier hardware, ensuring full compatibility with newer accelerators without manual tuning.

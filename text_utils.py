@@ -1,4 +1,6 @@
 import os
+import sys
+
 from typing import Mapping, Optional, Sequence
 
 from phoneme_dictionary import DEFAULT_DICTIONARY_PATH, load_phoneme_dictionary
@@ -47,8 +49,8 @@ class TextCleaner:
             try:
                 indexes.append(mapping[char])
             except KeyError:
-                pass
-                # print(f"(TextCleaner) Warning: Phoneme '{char}' not found in dictionary. Text: {display_text}")
+                print(f"TextCleaner error: phoneme '{char}' (ASCII: {ord(char)}) not found in dictionary. Text: {display_text}")
+                sys.exit()
         return indexes
 
     @property

@@ -1075,9 +1075,9 @@ def main(config_path):
                     loss_align / max(iters_test, 1),
                     loss_f / max(iters_test, 1),
                 )
-                + '\n\n\n'
+                + '\n'
             )
-            accelerator.print('\n\n\n')
+            accelerator.print('\n')
             if writer is not None:
                 writer.add_scalar('eval/mel_loss', loss_test / max(iters_test, 1), epoch + 1)
                 writer.add_scalar('eval/dur_loss', loss_align / max(iters_test, 1), epoch + 1)

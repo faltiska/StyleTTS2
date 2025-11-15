@@ -809,8 +809,8 @@ def main(config_path):
                     continue
 
         print('Epochs:', epoch + 1)
-        logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % (loss_test / iters_test, loss_align / iters_test, loss_f / iters_test) + '\n\n\n')
-        print('\n\n\n')
+        logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % (loss_test / iters_test, loss_align / iters_test, loss_f / iters_test) + '\n')
+        print('\n')
         if writer is not None:
             writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
             writer.add_scalar('eval/dur_loss', loss_test / iters_test, epoch + 1)

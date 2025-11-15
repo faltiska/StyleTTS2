@@ -1,3 +1,6 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 from munch import Munch
 from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
@@ -19,7 +22,6 @@ from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 from torch.utils.tensorboard import SummaryWriter
 from accelerate.logging import get_logger
-import os
 import shutil
 import click
 import random
@@ -303,9 +305,13 @@ def main(config_path):
         hop_length=slm_hop_length,
     ).to(device)
 
+    # Initialize global timing variables for persistent ETA calculation
+    global_start_time = time.time()
+    total_steps_completed = 0
+    
     for epoch in range(start_epoch, epochs):
         running_loss = 0
-        start_time = time.time()
+        epoch_start_time = time.time()
 
         _ = [model[key].train() for key in model]
 
@@ -433,22 +439,21 @@ def main(config_path):
             optimizer.step('style_encoder')
             optimizer.step('decoder')
             
-            if epoch >= TMA_epoch: 
-                optimizer.step('text_aligner')
-                optimizer.step('pitch_extractor')
-            
             iters = iters + 1
             
             if (i+1)%log_interval == 0 and accelerator.is_main_process:
-                elapsed_time = time.time() - start_time
+                total_steps_completed += log_interval
+                global_elapsed_time = time.time() - global_start_time
                 steps_per_epoch = len(train_list) // batch_size
                 total_steps = epochs * steps_per_epoch
                 current_step = epoch * steps_per_epoch + (i + 1)
-                avg_step_time = elapsed_time / (i + 1)
+                avg_step_time = global_elapsed_time / total_steps_completed
                 
                 # Epoch ETA
+                epoch_elapsed = time.time() - epoch_start_time
+                epoch_avg_step_time = epoch_elapsed / (i + 1)
                 remaining_steps_epoch = steps_per_epoch - (i + 1)
-                epoch_eta_seconds = remaining_steps_epoch * avg_step_time
+                epoch_eta_seconds = remaining_steps_epoch * epoch_avg_step_time
                 epoch_eta_minutes = int(epoch_eta_seconds // 60)
                 epoch_eta_str = f'{epoch_eta_minutes}m'
                 
@@ -459,7 +464,7 @@ def main(config_path):
                 eta_minutes = int((eta_seconds % 3600) // 60)
                 eta_str = f'{eta_hours}h{eta_minutes:02d}m' if eta_hours > 0 else f'{eta_minutes}m'
                 
-                print(f'\rEpoch [{epoch+1}/{epochs}], Step [{i+1}/{steps_per_epoch}], Mel: {running_loss / log_interval:.3f}, Gen: {loss_gen_all:.3f}, Disc: {d_loss:.3f}, Mono: {loss_mono:.3f}, S2S: {loss_s2s:.3f}, SLM: {loss_slm:.3f}, ETA: {epoch_eta_str} / {eta_str}', end='', flush=True)
+                print(f'\rEpoch [{epoch}/{epochs}], Step [{i}/{steps_per_epoch}], Mel: {running_loss / log_interval:.3f}, Gen: {loss_gen_all:.3f}, Disc: {d_loss:.3f}, Mono: {loss_mono:.3f}, S2S: {loss_s2s:.3f}, SLM: {loss_slm:.3f}, ETA: {epoch_eta_str} / {eta_str}', end='', flush=True)
                 
                 writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
                 writer.add_scalar('train/gen_loss', loss_gen_all, iters)
@@ -469,6 +474,9 @@ def main(config_path):
                 writer.add_scalar('train/slm_loss', loss_slm, iters)
 
                 running_loss = 0
+            else:
+                if accelerator.is_main_process:
+                    total_steps_completed += 1
                                 
         loss_test = 0
 
@@ -534,9 +542,8 @@ def main(config_path):
                 iters_test += 1
 
         if accelerator.is_main_process:
-            print('Epochs:', epoch + 1)
-            log_print('Validation loss: %.3f' % (loss_test / iters_test) + '\n\n\n\n', logger)
-            print('\n\n\n')
+            print('\nEpochs:', epoch + 1)
+            log_print('Validation loss: %.3f' % (loss_test / iters_test), logger)
             writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure('eval/attn', attn_image, epoch)

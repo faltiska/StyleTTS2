@@ -138,7 +138,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             rand_idx = np.random.randint(0, len(self.ptexts) - 1)
             ps = self.ptexts[rand_idx]
             
-            text = self.text_cleaner(ps)
+            text = [int(x) for x in ps.split()]
             text.insert(0, self.pad_index)
             text.append(self.pad_index)
 
@@ -172,8 +172,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             
         wave = np.concatenate([np.zeros([5000]), wave, np.zeros([5000])], axis=0)
         
-        text = self.text_cleaner(text)
-
+        text = [int(x) for x in text.split()]
         text.insert(0, self.pad_index)
         text.append(self.pad_index)
         

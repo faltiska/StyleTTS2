@@ -180,7 +180,7 @@ def main():
     parser = argparse.ArgumentParser(description='StyleTTS2 Text-to-Speech')
     parser.add_argument('text', help='Text to convert to speech')
     parser.add_argument('--output', default='output.wav', help='Output audio file')
-    parser.add_argument('--checkpoint', default='Models/LJSpeech/epoch_1st_00002.pth', help='Checkpoint file to load')
+    parser.add_argument('--checkpoint', default='Models/LJSpeech/epoch_1st_00012.pth', help='Checkpoint file to load')
     
     args = parser.parse_args()
     

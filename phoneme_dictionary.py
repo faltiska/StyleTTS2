@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 import threading
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
@@ -67,19 +68,12 @@ def _load_dictionary(path: str) -> Dict[str, int]:
     with open(path, "r", encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle)
         for row in reader:
-            if not row:
-                continue
             try:
                 phoneme, index = row[0], row[1]
-            except IndexError:
-                continue
-            phoneme = phoneme.strip()
-            if phoneme.startswith("\"") and phoneme.endswith("\""):
-                phoneme = phoneme[1:-1]
-            try:
                 dictionary[phoneme] = int(index)
-            except ValueError:
-                continue
+            except Exception as ve:
+                print(f"Found bad phoneme '{phoneme}' with index {index}, error: {ve}")
+                sys.exit()
     return dictionary
 
 
